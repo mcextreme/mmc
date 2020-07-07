@@ -1,4 +1,4 @@
-function varargout=mmclab(cfg,type)
+function varargout=mmclab(varargin)
 %
 %#############################################################################%
 %         MMCLAB - Mesh-based Monte Carlo (MMC) for MATLAB/GNU Octave         %
@@ -14,17 +14,23 @@ function varargout=mmclab(cfg,type)
 %#############################################################################%
 %
 % Format:
-%    [fluence,detphoton,ncfg,seeds]=mmclab(cfg,type);
+%    [fluence,detphoton,ncfg,seeds]=mmclab(cfg);
 %          or
 %    fluence=mmclab(cfg);
 %    newcfg=mmclab(cfg,'prep');
-%    [fluence,detphoton,ncfg,seeds]=mmclab(cfg);
+%    [fluence,detphoton,ncfg,seeds]=mmclab(cfg, options);
 %
 % Input:
 %    cfg: a struct, or struct array. Each element in cfg defines 
 %         a set of parameters for a simulation. 
 %
-%         It may contain the following fields:
+%    option: (optional), options is a string, specifying additional options
+%         option='preview': this plots the domain configuration using mcxpreview(cfg)
+%         option='opencl':  force using OpenCL (set cfg.gpuid=1 if not set)
+%                           instead of SSE on CPUs/GPUs that support OpenCL
+%
+%
+%    cfg may contain the following fields:
 %
 %== Required ==
 %     *cfg.nphoton:     the total number of photons to be simulated (integer)
@@ -53,6 +59,8 @@ function varargout=mmclab(cfg,type)
 %                       if set to a uint8 array, the binary data in each column is used 
 %                       to seed a photon (i.e. the "replay" mode), default value: 1648335518
 %      cfg.isreflect:   [1]-consider refractive index mismatch, 0-matched index
+%                       2 - total absorption on exterior surface
+%                       3 - prefect reflection (mirror) on exterior surface
 %      cfg.isnormalized:[1]-normalize the output fluence to unitary source, 0-no reflection
 %      cfg.isspecular:  [1]-calculate specular reflection if source is outside
 %      cfg.ismomentum:  [0]-save momentum transfer for each detected photon
@@ -228,9 +236,45 @@ function varargout=mmclab(cfg,type)
 % License: GNU General Public License version 3, please read LICENSE.txt for details
 %
 
-if(nargin==0)
-    error('input field cfg must be defined');
+try
+    defaultocl=evalin('base','USE_MCXCL');
+catch
+    defaultocl=1;
 end
+
+useopencl=defaultocl;
+
+if(nargin==2 && ischar(varargin{2}))
+    if(strcmp(varargin{2},'preview') || strcmp(varargin{2},'prep') || strcmp(varargin{2},'cuda'))
+        useopencl=0;
+    end
+end
+
+if(isstruct(varargin{1}))
+    for i=1:length(varargin{1})
+        castlist={'srcpattern','srcpos','detpos','prop','workload','srcdir'};
+        for j=1:length(castlist)
+            if(isfield(varargin{1}(i),castlist{j}))
+                varargin{1}(i).(castlist{j})=double(varargin{1}(i).(castlist{j}));
+            end
+        end
+    end
+end
+
+if(nargin==1 && ischar(varargin{1}) && strcmp(varargin{1},'gpuinfo'))
+    varargout{1}=mmc('gpuinfo');
+    return;
+end
+
+if(nargin==0)
+    return;
+end
+
+cfg=varargin{1};
+if(length(varargin)>=2)
+    type=varargin{2};
+end
+    
 if(~isstruct(cfg))
     error('cfg must be a struct or struct array');
 end
@@ -240,7 +284,7 @@ for i=1:len
     if(~isfield(cfg(i),'node') || ~isfield(cfg(i),'elem'))
         error('cfg.node or cfg.elem is missing');
     end
-    if(~isfield(cfg(i),'elemprop') ||isempty(cfg(i).elemprop) && size(cfg(i).elem,2)>4)
+    if(size(cfg(i).elem,2)>4)
         cfg(i).elemprop=cfg(i).elem(:,5);
     end
     if(~isfield(cfg(i),'isreoriented') || isempty(cfg(i).isreoriented) || cfg(i).isreoriented==0)
@@ -340,7 +384,12 @@ if(nargout>=3)
     varargout{nargout}=cfg;
 end
 
-if(nargin<2)
+if(useopencl==1)
+    if(isfield(cfg,'gpuid') && ~ischar(cfg.gpuid) && cfg.gpuid<-1)
+	cfg.gpuid=1;
+    end
+    [varargout{1:nargout}]=mmc(cfg);
+elseif(length(varargin)<2)
     [varargout{1:mmcout}]=mmc(cfg);
 elseif(strcmp(type,'omp'))
     [varargout{1:mmcout}]=mmc(cfg);
@@ -374,6 +423,9 @@ if(mmcout>=2)
             end
             newdetp.w0=detp(end,:)';  % last column is the initial packet weight
             newdetp.prop=cfg(i).prop;
+	    if(isfield(cfg(i),'unitinmm'))
+		newdetp.unitinmm=cfg(i).unitinmm;
+	    end
             newdetp.data=detp;      % enable this line for compatibility
             newdetpstruct(i)=newdetp;
         else
